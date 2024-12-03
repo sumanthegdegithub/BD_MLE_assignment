@@ -8,7 +8,17 @@ We have trained a model BayesianGaussianMixture on the data and then we have tra
     Worked for ~2 days to make the original code from sklearn.mixture compatible with dask, Could not the see the performance that was expected. So scraped the idea
 2. Using tensorflow to build BayesianGaussianMixture model. Could not finish either as I did not understand mathematics of
 BayesianGaussianMixture completely
-3. Batching the data, training BayesianGaussianMixture model with a warm start, working on optimizing other parts of the flow and implementing an early stop. as it was difficult to train the model on whole data and it did not improve after a certain records as the records are duplicated. 
+3. Batching the data, training BayesianGaussianMixture model with a warm start, working on optimizing other parts of the flow and implementing an early stop. as it was difficult to train the model on whole data and it did not improve after a certain records as the records are duplicated.
+4. 4. Using ray, cupy to speed up transform step did not work, they took same or more amount of time
+
+### Current Performance
+1. It takes ~10 mins to train
+2. ~30 mins to transform
+3. ~5 mins to inverse transform
+
+### Improvements in Mind
+1. Model can be trainined faster by training multiple models (may be 4) at once for certain number of epochs and then update the means, weights to average of all the 4 models
+2. Should work on speeding up transformation process, parallelize few part of it to make it run faster.
 
 ### Create virtual Environment
 ```
