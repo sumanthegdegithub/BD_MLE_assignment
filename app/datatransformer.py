@@ -18,12 +18,17 @@ import sys
 file = Path(__file__).resolve()
 parent, root = file.parent, file.parents[1]
 sys.path.append(str(root))
+import ray
 
 from app.logger import logger
 import yaml
 
 with open(f"{str(root)}\\config.yml", "r") as f:
     config = yaml.safe_load(f)
+
+@ray.remote
+def ray_transform(part):
+    return part.compute().values.reshape(-1, 1)
 
 class DataTransformer():
 
@@ -236,14 +241,18 @@ class DataTransformer():
                             # storing transformed numeric column represented as normalized values and corresponding modes
                             if p % 20 == 19:
                                 values += [csr_matrix(np.concatenate([features, re_ordered_phot], axis=1))]
-                                save_npz(f'{config['transformed_file_loc']}transformed_{p}.npz', vstack(values))
+                                save_npz(f'{str(root)}\\data\\transformed\\transformed_{p}.npz', vstack(values))
                                 values = []
-                                logger.info(f'transformation completed for {round((p+1)/parts, 2)}%')
+                                logger.info(f'transformation completed for {round((p+1)/len(parts), 2)}%')
                             else:
                                 values += [csr_matrix(np.concatenate([features, re_ordered_phot], axis=1))]
                             
-
-                    save_npz(f'{config['transformed_file_loc']}transformed_{p}.npz', vstack(values))
+                    if len(values) > 1:
+                        save_npz(f'{str(root)}\\data\\transformed\\transformed_{p}.npz', vstack(values))
+                    if len(values) == 1:
+                        save_npz(f'{str(root)}\\data\\transformed\\transformed_{p}.npz', values[0])
+                    else:
+                        pass
 
             logger.info('transformation complete')
         except Exception as e:
@@ -258,11 +267,11 @@ class DataTransformer():
 
             logger.info('inverse transformation started')
             data_loc = config['transformed_file_loc']
-            trans_formed_files = pd.Series(os.listdir(data_loc))
+            trans_formed_files = pd.Series(os.listdir(f'{str(root)}\\data\\transformed\\'))
             trans_formed_files_dict = dict(zip(trans_formed_files.str.split('.').str[0].str.split('_').str[1].astype(int), trans_formed_files))
             
             for i in tqdm(range(len(trans_formed_files_dict))):
-                data = load_npz(data_loc + '/' + trans_formed_files_dict[i]).toarray()
+                data = load_npz(f'{str(root)}\\data\\transformed\\' + trans_formed_files_dict[i]).toarray()
 
                 # used to iterate through the columns of the raw generated data
                 st = 0
@@ -303,7 +312,7 @@ class DataTransformer():
 
                         pd.DataFrame({
                             info['name']: tmp,
-                        }).to_parquet(f'{config['inverse_transformed_file_loc']}part.{i}.parquet')
+                        }).to_parquet(f'{str(root)}\\data\\inverse_transformed\\part.{i}.parquet')
 
             logger.info('inverse transformation completed')
 
