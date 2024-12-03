@@ -1,0 +1,4 @@
+n_clusters: 10
+eps: 0.005
+transformed_file_loc: /data/transformed/
+inverse_transformed_file_loc: /data/inverse_transformed/
