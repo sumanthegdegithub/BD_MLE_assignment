@@ -19,6 +19,8 @@ file = Path(__file__).resolve()
 parent, root = file.parent, file.parents[1]
 sys.path.append(str(root))
 import ray
+import polars as pl
+from numba import njit
 
 from app.logger import logger
 import yaml
@@ -29,6 +31,10 @@ with open(f"{str(root)}\\config.yml", "r") as f:
 @ray.remote
 def ray_transform(part):
     return part.compute().values.reshape(-1, 1)
+
+@njit
+def get_features(current, means, stds):
+    return (current - means) / (4 * stds), np.zeros(len(current), dtype='int')
 
 class DataTransformer():
 
@@ -201,14 +207,10 @@ class DataTransformer():
                             t= time.time() 
                             part = parts[p]
                             current = part[[info['name']]].values.compute()
-                            
+                             
                             #print(current, means, stds)
-                            features = (current - means) / (4 * stds)
+                            features, opt_sel = get_features(current, means, stds)
                             
-                            # number of distict modes
-                            
-                            # storing the mode for each data point by sampling from the probability mass distribution across all modes based on fitted bgm model
-                            opt_sel = np.zeros(len(current), dtype='int')
                             probs = self.model[id_].predict_proba(current.reshape([-1, 1]))
                             
                             #print('prediction complete')
@@ -237,15 +239,21 @@ class DataTransformer():
                             
                             # storing the original ordering for invoking inverse transform
                             self.ordering.append(largest_indices)
-                            
+                            pl.from_numpy(np.concatenate([features, re_ordered_phot], axis=1), orient="row").write_parquet(f'{str(root)}\\data\\transformed\\part.{p}.parquet')
                             # storing transformed numeric column represented as normalized values and corresponding modes
+                            '''
                             if p % 20 == 19:
-                                values += [csr_matrix(np.concatenate([features, re_ordered_phot], axis=1))]
+                                values += [np.concatenate([features, re_ordered_phot], axis=1)]
+                                pl.from_numpy(vstack(values), orient="row").write_parquet('hi.parquet')
                                 save_npz(f'{str(root)}\\data\\transformed\\transformed_{p}.npz', vstack(values))
                                 values = []
                                 logger.info(f'transformation completed for {round((p+1)/len(parts), 2)}%')
                             else:
-                                values += [csr_matrix(np.concatenate([features, re_ordered_phot], axis=1))]
+                                values += [np.concatenate([features, re_ordered_phot], axis=1)]
+                                #save_npz(f'{str(root)}\\data\\transformed\\transformed_{p}.npz', vstack(values))
+                                #values = []
+
+                            
                             
                     if len(values) > 1:
                         save_npz(f'{str(root)}\\data\\transformed\\transformed_{p}.npz', vstack(values))
@@ -253,6 +261,8 @@ class DataTransformer():
                         save_npz(f'{str(root)}\\data\\transformed\\transformed_{p}.npz', values[0])
                     else:
                         pass
+
+                    '''
 
             logger.info('transformation complete')
         except Exception as e:
@@ -268,10 +278,10 @@ class DataTransformer():
             logger.info('inverse transformation started')
             data_loc = config['transformed_file_loc']
             trans_formed_files = pd.Series(os.listdir(f'{str(root)}\\data\\transformed\\'))
-            trans_formed_files_dict = dict(zip(trans_formed_files.str.split('.').str[0].str.split('_').str[1].astype(int), trans_formed_files))
+            trans_formed_files_dict = dict(zip(trans_formed_files.str.split('.').str[1].astype(int), trans_formed_files))
             
             for i in tqdm(range(len(trans_formed_files_dict))):
-                data = load_npz(f'{str(root)}\\data\\transformed\\' + trans_formed_files_dict[i]).toarray()
+                data = pl.read_parquet(f'{str(root)}\\data\\transformed\\' + trans_formed_files_dict[i]).to_numpy()
 
                 # used to iterate through the columns of the raw generated data
                 st = 0
