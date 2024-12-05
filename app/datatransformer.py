@@ -28,13 +28,19 @@ import yaml
 with open(f"{str(root)}\\config.yml", "r") as f:
     config = yaml.safe_load(f)
 
-@ray.remote
-def ray_transform(part):
-    return part.compute().values.reshape(-1, 1)
+context = ray.init()
+print(context.dashboard_url)
 
 @njit
 def get_features(current, means, stds):
     return (current - means) / (4 * stds), np.zeros(len(current), dtype='int')
+
+@ray.remote
+class BackgroundActor:
+    def ray_save(self, features, re_ordered_phot, p):
+        pl.from_numpy(np.concatenate([features, re_ordered_phot], axis=1)).write_parquet(f'{str(root)}\\data\\transformed\\part.{p}.parquet')
+
+
 
 class DataTransformer():
 
@@ -117,6 +123,7 @@ class DataTransformer():
             line_number = exc_tb.tb_lineno
             logger.info(f'Error: {exc_value} occured in file {fname} at line {line_number}')
             return []
+        
 
     def fit(self):
         try:
@@ -195,6 +202,7 @@ class DataTransformer():
             values = []
             # iterating through column information
             logger.info('transformation started')
+            actor = BackgroundActor.remote()
             for id_, info in enumerate(self.meta):
                 
                 if info['type'] == "continuous":
@@ -204,8 +212,9 @@ class DataTransformer():
                     n_opts = sum(self.components[id_])
                     values = []
                     memory = pd.DataFrame()
+                    arange = np.arange(n_opts)
                     for p in tqdm(range(len(parts))):
-                            t= time.time() 
+                            t = time.time()
                             part = parts[p].compute()
                             part = part[[info['name']]]
                             if memory.shape[0] > 0:
@@ -214,56 +223,61 @@ class DataTransformer():
                                 part_not_in_memory = part.copy()
                             
                             if len(part_not_in_memory) > 0:
-                                current = part_not_in_memory[[info['name']]].values
-                                probs = self.model[id_].predict_proba(current.reshape([-1, 1]))
                                 if memory.shape[0]> 0:
-                                    part_not_in_memory[np.arange(probs.shape[1])] = probs
+                                    current = part_not_in_memory.drop_duplicates(info['name'])[[info['name']]].values
+                                    probs = self.model[id_].predict_proba(current.reshape([-1, 1]))
+                                    probs = probs[:, self.components[id_]] + 1e-6
+                                    part_not_in_memory[arange] = probs
                                     part = part.merge(memory, on=info['name'], how='left')
-                                    part.loc[~part[info['name']].isin(memory[info['name']]), np.arange(probs.shape[1])] = probs
-                                    probs = part[np.arange(probs.shape[1])].values
+                                    part = part.set_index(info['name']).combine_first(part_not_in_memory.set_index(info['name'])).reset_index()
+                                    #part.loc[~part[info['name']].isin(memory[info['name']]), np.arange(probs.shape[1])] = probs
+                                    probs = part[arange].values
                                     if memory.shape[0] < 1e5:
                                         memory = pd.concat([memory, part_not_in_memory.drop_duplicates(info['name'])])
                                 else:
-                                    part_not_in_memory[np.arange(probs.shape[1])] = probs
+                                    current = part_not_in_memory[[info['name']]].values
+                                    probs = self.model[id_].predict_proba(current.reshape([-1, 1]))
+                                    probs = probs[:, self.components[id_]] + 1e-6
+                                    part_not_in_memory[arange] = probs
                                     memory = part_not_in_memory.drop_duplicates(info['name']).copy()
                             else:
                                 part = part.merge(memory, on=info['name'], how='left')
                                 probs = part.drop(info['name'], axis=1).values
-
 
                             current = part[[info['name']]].values
                              
                             #print(current, means, stds)
                             features, opt_sel = get_features(current, means, stds)
 
-                            probs = probs[:, self.components[id_]] + 1e-6
+                            #probs = probs[:, self.components[id_]] + 1e-6
                             probs = probs / np.broadcast_to(probs.sum(axis=1).reshape((len(probs), 1)), probs.shape)
                             opt_sel = (probs.cumsum(axis=1) <= np.broadcast_to(np.random.random(len(probs)).reshape((len(probs), 1)), probs.shape)).sum(axis=1)
+
                             # creating a one-hot-encoding for the corresponding selected modes
-                            #print(opt_sel, 'opt_sel')
-                            
+
                             probs_onehot = np.eye(probs.shape[1])[opt_sel]
                             # obtaining the normalized values based on the appropriately selected mode and clipping to ensure values are within (-1,1)
                             features = features[:, self.components[id_]]
                             features = (features * probs_onehot).sum(axis=1).reshape([-1, 1])
                             
                             features = np.clip(features, -.99, .99)
-                            
+
                             # re-ordering the one-hot-encoding of modes in descending order as per their frequency of being selected
                             #re_ordered_phot = np.zeros_like(probs_onehot)
                             col_sums = probs_onehot.sum(axis=0)
                             #print(col_sums, 'col_sums')
                             n = probs_onehot.shape[1]
                             largest_indices = np.argsort(-1*col_sums)[:n]
-                            
+
                             #print(largest_indices)
                             re_ordered_phot = probs_onehot[:, largest_indices]
                             
                             # storing the original ordering for invoking inverse transform
                             self.ordering.append(largest_indices)
-                            
+
                             # storing transformed numeric column represented as normalized values and corresponding modes
-                            pl.from_numpy(np.concatenate([features, re_ordered_phot], axis=1)).write_parquet(f'{str(root)}\\data\\transformed\\part.{p}.parquet')
+                            actor.ray_save.remote(features, re_ordered_phot, p)
+
                             
                             '''
                             if p % 20 == 19:
@@ -278,13 +292,6 @@ class DataTransformer():
                                 #values = []
 
                             '''
-                            
-                    if len(values) > 1:
-                        pl.from_numpy(np.vstack(values)).write_parquet(f'{str(root)}\\data\\transformed\\part.{p}.parquet')
-                    if len(values) == 1:
-                        pl.from_numpy(values[0]).write_parquet(f'{str(root)}\\data\\transformed\\part.{p}.parquet')
-                    else:
-                        pass
 
 
             logger.info('transformation complete')
@@ -323,9 +330,9 @@ class DataTransformer():
                         # re-ordering the modes as per their original ordering
                         order = self.ordering[id_]
                         
-                        v_re_ordered = np.zeros_like(v)
-                        for id,val in enumerate(order):
-                            v_re_ordered[:,val] = v[:,id]
+                        v_re_ordered = np.empty_like(v)
+                        v_re_ordered[:, order] = v[:, np.arange(len(order))]
+
                         v = v_re_ordered
 
                         # ensuring un-used modes are represented with -100 such that they can be ignored when computing argmax
