@@ -454,7 +454,7 @@ def _compute_log_det_cholesky(matrix_chol, covariance_type, n_features):
 
     return log_det_chol
 
-
+@njit
 def _estimate_log_gaussian_prob_numba(X, means, precisions_chol, covariance_type, log_det, n_samples, n_features, n_components):
     
     if covariance_type == "full":

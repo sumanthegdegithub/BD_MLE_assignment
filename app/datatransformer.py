@@ -203,17 +203,39 @@ class DataTransformer():
                     parts = list(data.partitions)
                     n_opts = sum(self.components[id_])
                     values = []
+                    memory = pd.DataFrame()
                     for p in tqdm(range(len(parts))):
                             t= time.time() 
-                            part = parts[p]
-                            current = part[[info['name']]].values.compute()
+                            part = parts[p].compute()
+                            part = part[[info['name']]]
+                            if memory.shape[0] > 0:
+                                part_not_in_memory = part[~part[info['name']].isin(memory[info['name']])]
+                            else:
+                                part_not_in_memory = part.copy()
+                            
+                            if len(part_not_in_memory) > 0:
+                                current = part_not_in_memory[[info['name']]].values
+                                probs = self.model[id_].predict_proba(current.reshape([-1, 1]))
+                                if memory.shape[0]> 0:
+                                    part_not_in_memory[np.arange(probs.shape[1])] = probs
+                                    part = part.merge(memory, on=info['name'], how='left')
+                                    part.loc[~part[info['name']].isin(memory[info['name']]), np.arange(probs.shape[1])] = probs
+                                    probs = part[np.arange(probs.shape[1])].values
+                                    if memory.shape[0] < 1e5:
+                                        memory = pd.concat([memory, part_not_in_memory.drop_duplicates(info['name'])])
+                                else:
+                                    part_not_in_memory[np.arange(probs.shape[1])] = probs
+                                    memory = part_not_in_memory.drop_duplicates(info['name']).copy()
+                            else:
+                                part = part.merge(memory, on=info['name'], how='left')
+                                probs = part.drop(info['name'], axis=1).values
+
+
+                            current = part[[info['name']]].values
                              
                             #print(current, means, stds)
                             features, opt_sel = get_features(current, means, stds)
-                            
-                            probs = self.model[id_].predict_proba(current.reshape([-1, 1]))
-                            
-                            #print('prediction complete')
+
                             probs = probs[:, self.components[id_]] + 1e-6
                             probs = probs / np.broadcast_to(probs.sum(axis=1).reshape((len(probs), 1)), probs.shape)
                             opt_sel = (probs.cumsum(axis=1) <= np.broadcast_to(np.random.random(len(probs)).reshape((len(probs), 1)), probs.shape)).sum(axis=1)
@@ -239,13 +261,15 @@ class DataTransformer():
                             
                             # storing the original ordering for invoking inverse transform
                             self.ordering.append(largest_indices)
-                            pl.from_numpy(np.concatenate([features, re_ordered_phot], axis=1), orient="row").write_parquet(f'{str(root)}\\data\\transformed\\part.{p}.parquet')
+                            
                             # storing transformed numeric column represented as normalized values and corresponding modes
+                            pl.from_numpy(np.concatenate([features, re_ordered_phot], axis=1)).write_parquet(f'{str(root)}\\data\\transformed\\part.{p}.parquet')
+                            
                             '''
                             if p % 20 == 19:
                                 values += [np.concatenate([features, re_ordered_phot], axis=1)]
-                                pl.from_numpy(vstack(values), orient="row").write_parquet('hi.parquet')
-                                save_npz(f'{str(root)}\\data\\transformed\\transformed_{p}.npz', vstack(values))
+                                pl.from_numpy(np.vstack(values)).write_parquet(f'{str(root)}\\data\\transformed\\part.{p}.parquet')
+                                #save_npz(f'{str(root)}\\data\\transformed\\transformed_{p}.npz', vstack(values))
                                 values = []
                                 logger.info(f'transformation completed for {round((p+1)/len(parts), 2)}%')
                             else:
@@ -253,16 +277,15 @@ class DataTransformer():
                                 #save_npz(f'{str(root)}\\data\\transformed\\transformed_{p}.npz', vstack(values))
                                 #values = []
 
-                            
+                            '''
                             
                     if len(values) > 1:
-                        save_npz(f'{str(root)}\\data\\transformed\\transformed_{p}.npz', vstack(values))
+                        pl.from_numpy(np.vstack(values)).write_parquet(f'{str(root)}\\data\\transformed\\part.{p}.parquet')
                     if len(values) == 1:
-                        save_npz(f'{str(root)}\\data\\transformed\\transformed_{p}.npz', values[0])
+                        pl.from_numpy(values[0]).write_parquet(f'{str(root)}\\data\\transformed\\part.{p}.parquet')
                     else:
                         pass
 
-                    '''
 
             logger.info('transformation complete')
         except Exception as e:
@@ -280,7 +303,7 @@ class DataTransformer():
             trans_formed_files = pd.Series(os.listdir(f'{str(root)}\\data\\transformed\\'))
             trans_formed_files_dict = dict(zip(trans_formed_files.str.split('.').str[1].astype(int), trans_formed_files))
             
-            for i in tqdm(range(len(trans_formed_files_dict))):
+            for i in tqdm(trans_formed_files_dict.keys()):
                 data = pl.read_parquet(f'{str(root)}\\data\\transformed\\' + trans_formed_files_dict[i]).to_numpy()
 
                 # used to iterate through the columns of the raw generated data
