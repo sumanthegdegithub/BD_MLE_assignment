@@ -24,6 +24,8 @@ from numba import njit
 
 from app.logger import logger
 import yaml
+import threading
+import queue
 
 with open(f"{str(root)}\\config.yml", "r") as f:
     config = yaml.safe_load(f)
@@ -39,7 +41,7 @@ def get_features(current, means, stds):
 class BackgroundActor:
     def ray_save(self, features, re_ordered_phot, p):
         pl.from_numpy(np.concatenate([features, re_ordered_phot], axis=1)).write_parquet(f'{str(root)}\\data\\transformed\\part.{p}.parquet')
-
+        logger.info(f'saved {p}')
 
 
 class DataTransformer():
@@ -204,18 +206,36 @@ class DataTransformer():
             logger.info('transformation started')
             actor = BackgroundActor.remote()
             for id_, info in enumerate(self.meta):
+                data_queue_part1 = queue.Queue()
+                data_queue_part2 = queue.Queue()
                 
                 if info['type'] == "continuous":
                     means = self.model[id_].means_.reshape((1, self.n_clusters))
                     stds = np.sqrt(self.model[id_].covariances_).reshape((1, self.n_clusters))
-                    parts = list(data.partitions)
+                    
                     n_opts = sum(self.components[id_])
                     values = []
                     memory = pd.DataFrame()
-                    arange = np.arange(n_opts)
-                    for p in tqdm(range(len(parts))):
+
+                    def part_one(parts):
+                        parts = list(data.partitions)
+                        for p in tqdm(range(len(parts))):
+                            data_queue_part1.put((parts[p].compute(), p))
+                        data_queue_part1.put(None)
+
+                    def part_two(n_opts):
+                        memory = pd.DataFrame()
+                        
+                        arange = np.arange(n_opts)
+
+                        while True:
+                            data = data_queue_part1.get()
+
+                            if data is None:  # Stop signal
+                                data_queue_part2.put(None) 
+                                break
                             t = time.time()
-                            part = parts[p].compute()
+                            part, p = data
                             part = part[[info['name']]]
                             if memory.shape[0] > 0:
                                 part_not_in_memory = part[~part[info['name']].isin(memory[info['name']])]
@@ -245,53 +265,66 @@ class DataTransformer():
                                 probs = part.drop(info['name'], axis=1).values
 
                             current = part[[info['name']]].values
-                             
-                            #print(current, means, stds)
-                            features, opt_sel = get_features(current, means, stds)
 
-                            #probs = probs[:, self.components[id_]] + 1e-6
-                            probs = probs / np.broadcast_to(probs.sum(axis=1).reshape((len(probs), 1)), probs.shape)
-                            opt_sel = (probs.cumsum(axis=1) <= np.broadcast_to(np.random.random(len(probs)).reshape((len(probs), 1)), probs.shape)).sum(axis=1)
+                            data_queue_part2.put((current, probs, p)) 
 
-                            # creating a one-hot-encoding for the corresponding selected modes
+                        
 
-                            probs_onehot = np.eye(probs.shape[1])[opt_sel]
-                            # obtaining the normalized values based on the appropriately selected mode and clipping to ensure values are within (-1,1)
-                            features = features[:, self.components[id_]]
-                            features = (features * probs_onehot).sum(axis=1).reshape([-1, 1])
+                    def part_three(means, stds, actor):
                             
-                            features = np.clip(features, -.99, .99)
+                            while True:
 
-                            # re-ordering the one-hot-encoding of modes in descending order as per their frequency of being selected
-                            #re_ordered_phot = np.zeros_like(probs_onehot)
-                            col_sums = probs_onehot.sum(axis=0)
-                            #print(col_sums, 'col_sums')
-                            n = probs_onehot.shape[1]
-                            largest_indices = np.argsort(-1*col_sums)[:n]
+                                data = data_queue_part2.get()
 
-                            #print(largest_indices)
-                            re_ordered_phot = probs_onehot[:, largest_indices]
-                            
-                            # storing the original ordering for invoking inverse transform
-                            self.ordering.append(largest_indices)
+                                if data is None:  # Stop signal
+                                    break
 
-                            # storing transformed numeric column represented as normalized values and corresponding modes
-                            actor.ray_save.remote(features, re_ordered_phot, p)
+                                current, probs, p = data
+                                
+                                #print(current, means, stds)
+                                features, opt_sel = get_features(current, means, stds)
 
-                            
-                            '''
-                            if p % 20 == 19:
-                                values += [np.concatenate([features, re_ordered_phot], axis=1)]
-                                pl.from_numpy(np.vstack(values)).write_parquet(f'{str(root)}\\data\\transformed\\part.{p}.parquet')
-                                #save_npz(f'{str(root)}\\data\\transformed\\transformed_{p}.npz', vstack(values))
-                                values = []
-                                logger.info(f'transformation completed for {round((p+1)/len(parts), 2)}%')
-                            else:
-                                values += [np.concatenate([features, re_ordered_phot], axis=1)]
-                                #save_npz(f'{str(root)}\\data\\transformed\\transformed_{p}.npz', vstack(values))
-                                #values = []
+                                #probs = probs[:, self.components[id_]] + 1e-6
+                                probs = probs / np.broadcast_to(probs.sum(axis=1).reshape((len(probs), 1)), probs.shape)
+                                opt_sel = (probs.cumsum(axis=1) <= np.broadcast_to(np.random.random(len(probs)).reshape((len(probs), 1)), probs.shape)).sum(axis=1)
 
-                            '''
+                                # creating a one-hot-encoding for the corresponding selected modes
+
+                                probs_onehot = np.eye(probs.shape[1])[opt_sel]
+                                # obtaining the normalized values based on the appropriately selected mode and clipping to ensure values are within (-1,1)
+                                features = features[:, self.components[id_]]
+                                features = (features * probs_onehot).sum(axis=1).reshape([-1, 1])
+                                
+                                features = np.clip(features, -.99, .99)
+
+                                # re-ordering the one-hot-encoding of modes in descending order as per their frequency of being selected
+                                #re_ordered_phot = np.zeros_like(probs_onehot)
+                                col_sums = probs_onehot.sum(axis=0)
+                                #print(col_sums, 'col_sums')
+                                n = probs_onehot.shape[1]
+                                largest_indices = np.argsort(-1*col_sums)[:n]
+
+                                #print(largest_indices)
+                                re_ordered_phot = probs_onehot[:, largest_indices]
+                                
+                                # storing the original ordering for invoking inverse transform
+                                self.ordering.append(largest_indices)
+
+                                # storing transformed numeric column represented as normalized values and corresponding modes
+                                actor.ray_save.remote(features, re_ordered_phot, p)
+
+                    thread1 = threading.Thread(target=part_one,args=(data,))
+                    thread2 = threading.Thread(target=part_two,args=(n_opts,))
+                    thread3 = threading.Thread(target=part_three,args=(means, stds, actor))
+
+                    thread1.start()
+                    thread2.start()
+                    thread3.start()
+
+                    # Wait for threads to complete
+                    thread1.join()
+                    thread2.join()
+                    thread3.join()
 
 
             logger.info('transformation complete')

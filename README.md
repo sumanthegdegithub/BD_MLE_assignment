@@ -56,3 +56,11 @@ CP edited_package_scripts/_gaussian_mixture.py /venv/Lib/site-packages/sklearn/m
 1. It takes ~6 mins to train
 2. ~10 mins to transform
 3. ~4.5 mins to inverse transform
+
+### Update (2024-12-08)
+1. Sepereated sub-steps in transformations and ran them on seperate threads
+
+### Performance improvements
+1. It takes ~6 mins to train
+2. ~6 mins to transform
+3. ~4.5 mins to inverse transform
